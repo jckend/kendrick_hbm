@@ -23,7 +23,7 @@ def utterance_index(A, B):
 def property_masks():
     """Identify quantifiers satisfying each logical property."""
 
-    # 1. Conservativity
+    # 1. conservativity
     conservative = np.ones(N_QUANTIFIERS, dtype=bool)
 
     for A in range(M):
@@ -126,13 +126,13 @@ def log_marginal_likelihood(observations, hypothesis_mask):
 
     observations = np.asarray(observations, dtype=int)
 
-    # Which candidate quantifiers contain all observed utterances?
+    # which candidate quantifiers contain all observed utterances?
     contains_data = candidates[:, observations].all(axis=1)
 
-    # Extension size of each candidate quantifier
+    # extension size of each candidate quantifier
     sizes = candidates.sum(axis=1)
 
-    # Size principle:
+    # size principle:
     # P(D | H) = |H|^(-theta), if all observations are in H.
     log_likelihood = np.full(len(candidates), -np.inf)
 
@@ -237,7 +237,7 @@ def quantifier_id(predicate):
     return qid
 
 
-# Define three quantifier meanings
+# define quantifier meanings
 q_every = quantifier_id(lambda A, B: (A & B) == A)
 q_some = quantifier_id(lambda A, B: (A & B) != 0)
 q_no = quantifier_id(lambda A, B: (A & B) == 0)
@@ -256,7 +256,6 @@ def sample_utterances(qid, theta, rng):
         (int(i // M), int(i % M))
         for i in sampled
     ]
-
 
 # generate a dataset
 rng = np.random.default_rng(42)
