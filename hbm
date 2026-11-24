@@ -1,0 +1,275 @@
+import numpy as np
+from itertools import permutations
+
+# domain with two individuals
+N = 2
+M = 2 ** N                  # number of subsets of the domain
+N_UTTERANCES = M * M        # number of possible (A, B) pairs
+N_QUANTIFIERS = 2 ** N_UTTERANCES
+
+# each row represents one generalized quantifier.
+# each column represents one possible utterance (A, B).
+q_ids = np.arange(N_QUANTIFIERS, dtype=np.uint32)
+bits = np.arange(N_UTTERANCES, dtype=np.uint32)
+
+TRUTH = ((q_ids[:, None] >> bits) & 1).astype(bool)
+
+
+def utterance_index(A, B):
+    """Encode an utterance (A, B) as an integer."""
+    return A * M + B
+
+
+def property_masks():
+    """Identify quantifiers satisfying each logical property."""
+
+    # 1. Conservativity
+    conservative = np.ones(N_QUANTIFIERS, dtype=bool)
+
+    for A in range(M):
+        for B1 in range(M):
+            for B2 in range(M):
+                if (A & B1) == (A & B2):
+                    i = utterance_index(A, B1)
+                    j = utterance_index(A, B2)
+                    conservative &= (TRUTH[:, i] == TRUTH[:, j])
+
+    # 2. upward and downward monotonicity
+    upward = np.ones(N_QUANTIFIERS, dtype=bool)
+    downward = np.ones(N_QUANTIFIERS, dtype=bool)
+
+    for A in range(M):
+        for B1 in range(M):
+            for B2 in range(M):
+
+                # B1 is a subset of B2
+                if (B1 & B2) == B1:
+                    i = utterance_index(A, B1)
+                    j = utterance_index(A, B2)
+
+                    upward &= (~TRUTH[:, i] | TRUTH[:, j])
+                    downward &= (~TRUTH[:, j] | TRUTH[:, i])
+
+    monotone = upward | downward
+
+    # 3. symmetry
+    symmetric = np.ones(N_QUANTIFIERS, dtype=bool)
+
+    for A in range(M):
+        for B in range(M):
+            i = utterance_index(A, B)
+            j = utterance_index(B, A)
+            symmetric &= (TRUTH[:, i] == TRUTH[:, j])
+
+    # 4. isomorphism invariance
+    isomorphism_invariant = np.ones(N_QUANTIFIERS, dtype=bool)
+
+    for perm in permutations(range(N)):
+
+        def permute_set(s):
+            result = 0
+            for individual in range(N):
+                if s & (1 << individual):
+                    result |= (1 << perm[individual])
+            return result
+
+        mapped_indices = np.array([
+            utterance_index(permute_set(A), permute_set(B))
+            for A in range(M)
+            for B in range(M)
+        ])
+
+        isomorphism_invariant &= np.all(
+            TRUTH == TRUTH[:, mapped_indices],
+            axis=1
+        )
+
+    return {
+        "all": np.ones(N_QUANTIFIERS, dtype=bool),
+        "conservative": conservative,
+        "monotone": monotone,
+        "symmetric": symmetric,
+        "isomorphism_invariant": isomorphism_invariant
+    }
+
+
+PROPERTIES = property_masks()
+
+for name, mask in PROPERTIES.items():
+    print(f"{name}: {mask.sum()} quantifiers")
+
+
+def logmeanexp(x):
+    """Numerically stable log(mean(exp(x)))."""
+    maximum = np.max(x)
+
+    if np.isneginf(maximum):
+        return -np.inf
+
+    return maximum + np.log(np.mean(np.exp(x - maximum)))
+
+
+def log_marginal_likelihood(observations, hypothesis_mask):
+    """
+    P(D | O) = sum_H P(D | H) P(H | O)
+
+    observations: list of encoded (A, B) utterances
+    hypothesis_mask: Boolean mask identifying permitted quantifiers
+    """
+
+    candidates = TRUTH[hypothesis_mask]
+
+    theta = len(observations)
+
+    if theta == 0:
+        return 0.0
+
+    observations = np.asarray(observations, dtype=int)
+
+    # Which candidate quantifiers contain all observed utterances?
+    contains_data = candidates[:, observations].all(axis=1)
+
+    # Extension size of each candidate quantifier
+    sizes = candidates.sum(axis=1)
+
+    # Size principle:
+    # P(D | H) = |H|^(-theta), if all observations are in H.
+    log_likelihood = np.full(len(candidates), -np.inf)
+
+    valid = contains_data & (sizes > 0)
+
+    log_likelihood[valid] = (
+        -theta * np.log(sizes[valid])
+    )
+
+    # Uniform prior over candidate meanings
+    return logmeanexp(log_likelihood)
+
+
+def hierarchical_bayesian_model(
+    data,
+    property_name="conservative",
+    prior_restricted=0.5
+):
+    """
+    Hierarchical Bayesian inference.
+
+    Parameters
+    ----------
+    data : dict
+        Maps determiner names to lists of observed (A, B) pairs.
+
+    property_name : str
+        The property defining the restricted overhypothesis.
+        Options: conservative, monotone, symmetric,
+                 isomorphism_invariant.
+
+    prior_restricted : float
+        Prior probability of the restricted overhypothesis.
+
+    Returns
+    -------
+    Dictionary containing posterior probabilities.
+    """
+
+    restricted = PROPERTIES[property_name]
+    unrestricted = PROPERTIES["all"]
+
+    # encode the observed utterances
+    encoded_data = {
+        determiner: [
+            utterance_index(A, B) for A, B in examples
+        ]
+        for determiner, examples in data.items()
+    }
+
+    # calculate marginal likelihood under each overhypothesis.
+    # each determiner has its own independently sampled meaning.
+
+    log_evidence_restricted = 0.0
+    log_evidence_unrestricted = 0.0
+
+    for determiner, observations in encoded_data.items():
+
+        log_evidence_restricted += log_marginal_likelihood(
+            observations, restricted
+        )
+
+        log_evidence_unrestricted += log_marginal_likelihood(
+            observations, unrestricted
+        )
+
+    # Bayesian updating
+    log_prior_restricted = np.log(prior_restricted)
+    log_prior_unrestricted = np.log(1 - prior_restricted)
+
+    log_joint = np.array([
+        log_evidence_restricted + log_prior_restricted,
+        log_evidence_unrestricted + log_prior_unrestricted
+    ])
+    maximum = np.max(log_joint)
+    log_normalizer = maximum + np.log(
+        np.sum(np.exp(log_joint - maximum))
+    )
+
+    posterior = np.exp(log_joint - log_normalizer)
+
+    return {
+        "restricted_overhypothesis": property_name,
+        "posterior_restricted": posterior[0],
+        "posterior_unrestricted": posterior[1],
+        "log_evidence_restricted": log_evidence_restricted,
+        "log_evidence_unrestricted": log_evidence_unrestricted
+    }
+
+def quantifier_id(predicate):
+    """Construct a quantifier from a Boolean truth condition."""
+
+    qid = 0
+
+    for A in range(M):
+        for B in range(M):
+            i = utterance_index(A, B)
+
+            if predicate(A, B):
+                qid |= (1 << i)
+
+    return qid
+
+
+# Define three quantifier meanings
+q_every = quantifier_id(lambda A, B: (A & B) == A)
+q_some = quantifier_id(lambda A, B: (A & B) != 0)
+q_no = quantifier_id(lambda A, B: (A & B) == 0)
+
+def sample_utterances(qid, theta, rng):
+    """Sample theta utterances uniformly from a quantifier's extension."""
+
+    extension = np.flatnonzero(TRUTH[qid])
+
+    if len(extension) == 0:
+        raise ValueError("Cannot sample from an empty quantifier.")
+
+    sampled = rng.choice(extension, size=theta, replace=True)
+
+    return [
+        (int(i // M), int(i % M))
+        for i in sampled
+    ]
+
+
+# generate a dataset
+rng = np.random.default_rng(42)
+
+data = {
+    "every": sample_utterances(q_every, 5, rng),
+    "some": sample_utterances(q_some, 5, rng),
+    "no": sample_utterances(q_no, 5, rng)
+}
+
+# infer the conservativity overhypothesis
+result = hierarchical_bayesian_model(
+    data,
+    property_name="conservative",
+    prior_restricted=0.5
+)
